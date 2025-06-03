@@ -2,7 +2,7 @@ POSTGRES_USER=postgres
 POSTGRES_PASSWORD=Sup3rBIMgod!
 POSTGRES_DB=n8n
 POSTGRES_HOST=localhost
-POSTGRES_PORT=5436  # Based on your screenshot showing port 5436
+POSTGRES_PORT=5436  
 
 N8N_ENCRYPTION_KEY=Thatsapp!esn0ranges
 N8N_USER_MANAGEMENT_JWT_SECRET=Rump!e&Hobbes
