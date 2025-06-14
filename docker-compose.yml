@@ -15,6 +15,13 @@ volumes:
   vllm_cache:
   neo4j_data:
   neo4j_logs:
+  # New volumes for monitoring
+  grafana_storage:
+  loki_storage:
+  tempo_storage:
+  mimir_storage:
+  influxdb_storage:
+  prometheus_storage:
   
 x-n8n: &service-n8n
   image: n8nio/n8n:latest
@@ -151,6 +158,169 @@ services:
       - NEO4J_AUTH=neo4j/password123
       - NEO4J_PLUGINS=["apoc", "graph-data-science"]
 
+  # ====================
+  # MONITORING STACK
+  # ====================
+
+  # Grafana - Main visualization platform (using port 3030 to avoid conflict with Open WebUI)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    networks: ['demo']
+    restart: unless-stopped
+    ports:
+      - "3030:3000"  # External:Internal - Access Grafana at http://localhost:3030
+    environment:
+      - GF_INSTALL_PLUGINS=redis-app,grafana-clock-panel,grafana-simple-json-datasource,grafana-piechart-panel
+      - GF_SERVER_ROOT_URL=http://localhost:3030
+      - GF_SECURITY_ADMIN_PASSWORD=admin123  # Change this!
+    volumes:
+      - grafana_storage:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - influxdb
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    networks: ['demo']
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus_storage:/prometheus
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  # Loki - Log aggregation
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    networks: ['demo']
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_storage:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+
+  # Promtail - Log collector for Loki
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    networks: ['demo']
+    restart: unless-stopped
+    volumes:
+      - /var/log:/var/log:ro
+      - ./promtail-config.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+
+  # Tempo - Distributed tracing
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tempo
+    networks: ['demo']
+    restart: unless-stopped
+    ports:
+      - "3200:3200"
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+    volumes:
+      - tempo_storage:/tmp/tempo
+    command: [ "-config.file=/etc/tempo.yaml" ]
+
+  # Mimir - Long-term metrics storage
+  mimir:
+    image: grafana/mimir:latest
+    container_name: mimir
+    networks: ['demo']
+    restart: unless-stopped
+    ports:
+      - "9009:9009"
+    volumes:
+      - mimir_storage:/data
+    command: [ "-config.file=/etc/mimir.yaml" ]
+
+  # InfluxDB - Time-series database for IoT/sensor data
+  influxdb:
+    image: influxdb:2
+    container_name: influxdb
+    networks: ['demo']
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=password123
+      - DOCKER_INFLUXDB_INIT_ORG=bim-org
+      - DOCKER_INFLUXDB_INIT_BUCKET=bim-metrics
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=super-secret-auth-token
+    volumes:
+      - influxdb_storage:/var/lib/influxdb2
+
+  # Node Exporter - System metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    networks: ['demo']
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+
+  # cAdvisor - Container metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    networks: ['demo']
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+
+  # GPU Monitoring (NVIDIA) - Only runs with GPU profile
+  dcgm-exporter:
+    profiles: ["gpu-nvidia"]
+    image: nvidia/dcgm-exporter:latest
+    container_name: dcgm-exporter
+    networks: ['demo']
+    restart: unless-stopped
+    ports:
+      - "9400:9400"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ====================
+  # AI/LLM SERVICES
+  # ====================
+
   # Text Generation WebUI - GPU version
   text-generation-webui:
     profiles: ["gpu-nvidia"]
@@ -185,7 +355,7 @@ services:
     networks: ['demo']
     restart: unless-stopped
     ports:
-      - 8080:8080
+      - 8081:8080  # Changed from 8080 to avoid conflict with cAdvisor
     volumes:
       - localai_models:/build/models
       - localai_images:/tmp/generated/images
@@ -254,7 +424,7 @@ services:
     networks: ['demo']
     restart: unless-stopped
     ports:
-      - 8080:8080
+      - 8081:8080  # Changed from 8080 to avoid conflict with cAdvisor
     volumes:
       - localai_models:/build/models
       - localai_images:/tmp/generated/images
